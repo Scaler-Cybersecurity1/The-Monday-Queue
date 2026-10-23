@@ -1,0 +1,510 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>The Monday Queue</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<meta name="description" content="TRIAGE-01 — a hands-on SOC lab: triage a queue of 12 alerts with verdict and priority, find the real intrusion in the noise, and recover a flag.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700;800&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Layout: a SOC triage queue — a sticky shift bar over a worklist of alert cards,
+   each with a verdict + priority dropdown. The work is classifying the pile and
+   finding the one real intrusion hiding in the noise. */
+:root {
+  --bg: #eef1f5; --surface: #ffffff; --surface-2: #e6ebf2; --ink: #141a23; --muted: #566276;
+  --line: #d2d9e3; --accent: #5b3fb0; --accent-soft: #e9e3f8; --accent-ink: #ffffff;
+  --good: #1d7a4b; --bad: #b42318; --warn: #9a6400;
+  --p1: #b42318; --p2: #b4530a; --p3: #9a6400; --p4: #566276;
+  --bar: #1b1630; --bar-ink: #ece8f6; --bar-muted: #9d95bb;
+  --font-display: "Archivo", Arial, system-ui, sans-serif;
+  --font-body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+  --radius: 6px; color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0d0b16; --surface: #16131f; --surface-2: #1f1b2b; --ink: #e6e2f1; --muted: #9a93b0;
+    --line: #2b2640; --accent: #a088ee; --accent-soft: #241c3c; --accent-ink: #120a24;
+    --good: #4cc38a; --bad: #f2777a; --warn: #e6b450;
+    --p1: #f2777a; --p2: #f0a04b; --p3: #e6b450; --p4: #9a93b0;
+    --bar: #080611; --bar-ink: #e6e2f1; --bar-muted: #8a82a6; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0d0b16; --surface: #16131f; --surface-2: #1f1b2b; --ink: #e6e2f1; --muted: #9a93b0;
+  --line: #2b2640; --accent: #a088ee; --accent-soft: #241c3c; --accent-ink: #120a24;
+  --good: #4cc38a; --bad: #f2777a; --warn: #e6b450;
+  --p1: #f2777a; --p2: #f0a04b; --p3: #e6b450; --p4: #9a93b0;
+  --bar: #080611; --bar-ink: #e6e2f1; --bar-muted: #8a82a6; color-scheme: dark;
+}
+*, *::before, *::after { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.55 var(--font-body); }
+body::before { content: ""; position: fixed; inset: 0 0 auto; height: env(safe-area-inset-top, 0px); z-index: 10; background: var(--bar); }
+[hidden] { display: none !important; }
+button, input, select { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.gutter { padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+.inner { max-width: 1080px; margin: 0 auto; }
+.eyebrow { font: 600 11.5px/1.2 var(--font-body); letter-spacing: .09em; text-transform: uppercase; color: var(--muted); }
+h1, h2, h3 { font-family: var(--font-display); text-wrap: balance; margin: 0; }
+
+.topbar { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 5; background: var(--bar); color: var(--bar-ink); padding-block: 12px; }
+.topbar .inner { display: grid; grid-template-columns: auto 1fr auto; gap: 10px 24px; align-items: center; }
+.case-id { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.case-id .eyebrow { color: var(--bar-muted); } .case-id strong { font: 700 16px/1.2 var(--font-display); }
+.steps { display: flex; gap: 4px; list-style: none; margin: 0; padding: 0; min-width: 0; }
+.steps li { flex: 1; min-width: 0; font-size: 11.5px; line-height: 1.25; color: var(--bar-muted); padding-top: 7px;
+  border-top: 3px solid color-mix(in srgb, var(--bar-ink) 16%, transparent); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.steps li.done { color: var(--bar-ink); border-top-color: color-mix(in srgb, var(--good) 60%, transparent); }
+.steps li.now { color: var(--bar-ink); font-weight: 600; border-top-color: var(--accent); }
+.progress { text-align: right; font: 500 13px/1.3 var(--font-mono); color: var(--bar-muted); }
+.progress b { color: var(--bar-ink); }
+
+main { padding-block: 24px 44px; }
+.panel { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); }
+.stage { display: grid; gap: 20px; }
+
+/* briefing / report sheet */
+.sheet { max-width: 880px; margin: 0 auto; padding: 32px 34px; display: grid; gap: 20px; }
+.sheet h1 { font-size: clamp(34px, 6.5vw, 54px); font-weight: 800; line-height: .98; letter-spacing: -.015em; }
+.sheet .lede { font-size: 17px; max-width: 64ch; margin: 0; }
+.facts { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+.facts div { background: var(--surface); padding: 12px 14px; display: grid; gap: 4px; } .facts b { font-size: 14px; font-weight: 600; }
+.rules { margin: 0; padding-left: 20px; display: grid; gap: 7px; max-width: 72ch; } .rules li::marker { color: var(--accent); }
+.sheet h2 { font-size: 20px; font-weight: 700; }
+
+.intro { padding: 22px 24px; display: grid; gap: 14px; }
+.msg { display: grid; grid-template-columns: 36px 1fr; gap: 12px; padding: 14px 16px; background: var(--surface-2); border-radius: var(--radius); }
+.avatar { width: 36px; height: 36px; border-radius: 50%; display: grid; place-items: center; background: var(--accent); color: var(--accent-ink); font: 600 13px/1 var(--font-body); }
+.msg .who { font-size: 13px; color: var(--muted); } .msg .who b { color: var(--ink); font-weight: 600; } .msg p { margin: 4px 0 0; }
+.intro h2 { font-size: clamp(21px,2.6vw,26px); font-weight: 700; }
+.intro p.lede { margin: 0; max-width: 66ch; }
+.legend { display: flex; flex-wrap: wrap; gap: 8px 16px; font-size: 12.5px; color: var(--muted); }
+.legend b { color: var(--ink); font-weight: 600; }
+
+/* alert queue */
+.queue { display: grid; gap: 12px; }
+.toolbar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; justify-content: space-between; }
+.toolbar .count { font: 500 13px/1.3 var(--font-mono); color: var(--muted); } .toolbar .count b { color: var(--ink); }
+.alert { border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 16px; display: grid; gap: 10px; background: var(--surface); }
+.alert.set { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
+.alert-top { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: baseline; }
+.alert-id { font: 600 13px/1 var(--font-mono); }
+.alert-src { font-size: 12px; color: var(--accent); font-weight: 600; letter-spacing: .03em; text-transform: uppercase; }
+.alert-time { font: 500 12px/1 var(--font-mono); color: var(--muted); margin-left: auto; }
+.alert-ev { font: 13.5px/1.55 var(--font-mono); background: var(--surface-2); padding: 10px 12px; border-radius: var(--radius); overflow-wrap: anywhere; }
+.alert-ev b { color: var(--accent); }
+.controls { display: flex; flex-wrap: wrap; gap: 10px; }
+.control { display: grid; gap: 4px; flex: 1 1 180px; min-width: 0; }
+.control label { font-size: 11.5px; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+select { padding: 9px 10px; border-radius: var(--radius); border: 1px solid var(--line); background: var(--surface); font-size: 13.5px; width: 100%; }
+select:focus { border-color: var(--accent); outline: none; }
+select.done { border-color: color-mix(in srgb, var(--good) 45%, var(--line)); }
+.verdict-ping, .verdict-benign { } /* styling hook */
+
+.actions { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+.btn { border: 1px solid transparent; border-radius: var(--radius); padding: 10px 16px; cursor: pointer; font-weight: 600; font-size: 14px; background: var(--accent); color: var(--accent-ink); }
+.btn:hover { filter: brightness(1.07); } .btn:disabled { opacity: .45; cursor: not-allowed; filter: none; }
+.btn.ghost { background: transparent; color: var(--ink); border-color: var(--line); } .btn.ghost:hover { border-color: var(--muted); filter: none; }
+.note { font-size: 13px; color: var(--muted); margin: 0; max-width: 72ch; }
+.note.bad { color: var(--bad); } .note.good { color: var(--good); }
+
+/* investigate fields */
+.task { padding: 24px 26px; display: grid; gap: 16px; }
+.task h2 { font-size: clamp(21px,2.6vw,26px); font-weight: 700; }
+.steer { border-left: 3px solid var(--accent); padding: 2px 0 2px 14px; } .steer p { margin: 0; font-size: 13.5px; color: var(--muted); max-width: 66ch; } .steer b { color: var(--ink); }
+.field { display: grid; gap: 8px; }
+.field label { font-weight: 600; font-size: 14px; } .field .sub { font-size: 13px; color: var(--muted); margin: -4px 0 0; }
+.answer-row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+.answer-row input { flex: 1 1 240px; min-width: 0; padding: 11px 12px; border-radius: var(--radius); border: 1px solid var(--line); background: var(--surface); font-family: var(--font-mono); }
+.answer-row input:focus { border-color: var(--accent); outline: none; box-shadow: 0 0 0 3px var(--accent-soft); }
+.status { font-family: var(--font-mono); font-size: 13px; } .status.ok { color: var(--good); } .status.no { color: var(--bad); }
+details.tip { font-size: 13px; } details.tip summary { cursor: pointer; color: var(--accent); width: fit-content; } details.tip p { margin: 8px 0 0; color: var(--muted); max-width: 66ch; }
+
+/* decision */
+.prompt { font: 600 17px/1.35 var(--font-display); }
+.options { display: grid; gap: 10px; }
+.opt { display: grid; grid-template-columns: 28px 1fr; gap: 12px; text-align: left; align-items: start; padding: 13px 14px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); cursor: pointer; transition: border-color .15s, background-color .15s; }
+.opt:hover:not(:disabled) { border-color: var(--accent); background: var(--accent-soft); }
+.opt .key { width: 28px; height: 28px; border-radius: 4px; display: grid; place-items: center; font: 600 13px/1 var(--font-mono); border: 1px solid var(--line); color: var(--muted); }
+.opt:disabled { cursor: default; } .opt.faded { opacity: .45; }
+.opt.chosen { border-color: var(--accent); background: var(--accent-soft); } .opt.chosen .key { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.outcome { border-left: 3px solid var(--accent); padding: 4px 0 4px 16px; } .outcome p { margin: 0; max-width: 66ch; }
+
+/* report */
+.flagbox { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; justify-content: space-between; padding: 16px 18px; border: 2px dashed var(--accent); border-radius: var(--radius); background: var(--accent-soft); }
+.flagbox code { font: 500 clamp(15px,2.6vw,21px)/1.3 var(--font-mono); overflow-wrap: anywhere; min-width: 0; }
+.verdict { display: grid; grid-template-columns: auto 1fr; gap: 18px; align-items: center; }
+.grade { font: 800 42px/1 var(--font-display); width: 82px; height: 82px; display: grid; place-items: center; border-radius: var(--radius); border: 2px solid currentColor; }
+.verdict h2 { margin-bottom: 4px; } .verdict p { margin: 0; color: var(--muted); max-width: 60ch; }
+.debrief { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--line); }
+.debrief li { display: grid; grid-template-columns: 70px 1fr auto; gap: 12px; padding: 11px 0; border-bottom: 1px solid var(--line); align-items: baseline; }
+.debrief .id { font: 600 12.5px/1.3 var(--font-mono); } .debrief .d { font-size: 13px; } .debrief .d .you { font-family: var(--font-mono); }
+.debrief .mark { font-family: var(--font-mono); font-size: 13px; } .debrief .mark.ok { color: var(--good); } .debrief .mark.no { color: var(--bad); }
+.restart-row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+footer { padding-block: 0 32px; font-size: 12.5px; color: var(--muted); }
+footer .inner { border-top: 1px solid var(--line); padding-top: 14px; }
+
+@media (max-width: 720px) {
+  .topbar .inner { grid-template-columns: 1fr auto; } .steps { grid-column: 1 / -1; grid-row: 2; }
+  .steps li { font-size: 0; } .steps li.now { font-size: 11.5px; flex: 4; }
+  .sheet, .intro, .task { padding: 20px 18px; } .facts { grid-template-columns: 1fr; }
+  .debrief li { grid-template-columns: 1fr auto; }
+}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+</head>
+<body>
+
+<header class="topbar gutter">
+  <div class="inner">
+    <div class="case-id"><span class="eyebrow">Driftwood SOC · Monday shift</span><strong>QUEUE-2026-1019</strong></div>
+    <ol class="steps" id="steps" aria-label="Step"></ol>
+    <div class="progress" id="progress"></div>
+  </div>
+</header>
+
+<main class="gutter">
+  <div class="inner">
+
+    <section class="panel sheet" id="briefing">
+      <div class="eyebrow">SOC Triage Lab · TRIAGE-01</div>
+      <h1>The Monday Queue</h1>
+      <p class="lede">You open your shift at Driftwood's SOC and the overnight queue is full: <b>12 alerts</b> waiting. Most are noise. One host is genuinely compromised, and the signal is split across a few alerts. Your job is to triage the whole pile, then find and escalate the real intrusion.</p>
+      <div class="facts">
+        <div><span class="eyebrow">Your role</span><b>Tier-1 SOC analyst</b></div>
+        <div><span class="eyebrow">Time needed</span><b>25–35 minutes</b></div>
+        <div><span class="eyebrow">You will</span><b>Triage 12 alerts · trace the intrusion · escalate</b></div>
+      </div>
+      <h2>How this lab works</h2>
+      <ol class="rules">
+        <li>For every alert, set a <b>Verdict</b> and a <b>Priority</b> from the dropdowns, based on its evidence.</li>
+        <li><b>Verdict:</b> <i>False positive</i> (not real), <i>Benign</i> (real but no threat — e.g. an attack that was blocked), <i>Suspicious</i> (needs a look), <i>Malicious</i> (confirmed bad).</li>
+        <li><b>Priority:</b> P1 (critical, act now) → P4 (informational). A blocked attack is low priority; an active compromise with data loss is P1.</li>
+        <li>Submit your triage. You can't move on until you've correctly flagged the alerts that make up the real intrusion — that's the core skill.</li>
+        <li>Then recover the facts from those alerts to build the <b>flag</b>, and make one escalation decision. Submit the flag on your course platform.</li>
+      </ol>
+      <div class="restart-row">
+        <button class="btn" id="startBtn" type="button">Start the shift</button>
+        <button class="btn ghost" id="resetBtn" type="button" hidden>Start over</button>
+        <span class="note" id="resumeHint" hidden>Progress on this device was restored.</span>
+      </div>
+    </section>
+
+    <section id="stageWrap" hidden></section>
+    <section class="panel sheet" id="report" hidden></section>
+  </div>
+</main>
+
+<footer class="gutter"><div class="inner">Fictional training scenario. Driftwood Analytics, its hosts and users are invented; all IP addresses are from reserved documentation ranges (RFC&nbsp;5737).</div></footer>
+
+<script>
+"use strict";
+
+/* =====================================================================
+   SCENARIO — TRIAGE-01. Answers checked by SHA-256 hash (never in source).
+   Verdict codes: fp | benign | suspicious | malicious   Priority: p1..p4
+   ===================================================================== */
+const ALERTS = [
+  { id: "A-1019", time: "08:03", src: "Antivirus", ev: "EICAR test string detected in C:\\IT\\av-test\\eicar.txt on WS-IT-03 (file created by the weekly AV self-test job).", v: "fp", p: "p4" },
+  { id: "A-1021", time: "08:06", src: "Firewall", ev: "Inbound RDP (3389) from 198.51.100.60 to WS-FINANCE-12 — BLOCKED by perimeter policy.", v: "benign", p: "p4" },
+  { id: "A-1024", time: "08:11", src: "Web proxy", ev: "WS-MKT-04 user visited a live-sports streaming site — blocked by acceptable-use web filter.", v: "benign", p: "p4" },
+  { id: "A-1027", time: "08:19", src: "WAF", ev: "SQL keyword ('SELECT') seen in the response body of /product/search — matches an application stack trace, no injection in the request.", v: "suspicious", p: "p3" },
+  { id: "A-1029", time: "08:25", src: "Identity", ev: "User 'k.vance': 4 failed logins then success — all from 203.0.113.44, the user's usual office IP, within 90 seconds.", v: "benign", p: "p3" },
+  { id: "A-1032", time: "08:31", src: "EDR", ev: "WS-FINANCE-12: WINWORD.EXE spawned powershell.exe -enc <base64> (encoded command). Office document macro execution.", v: "malicious", p: "p1" },
+  { id: "A-1035", time: "08:36", src: "EDR", ev: "EXCH-01: service account ran Get-Mailbox — matches the scheduled nightly mailbox-report job.", v: "benign", p: "p4" },
+  { id: "A-1038", time: "08:44", src: "DNS", ev: "WS-MKT-04 made a single DNS lookup for newly-registered domain promo-deals.store, then nothing further.", v: "suspicious", p: "p3" },
+  { id: "A-1041", time: "08:52", src: "Web proxy", ev: "WS-FINANCE-12: regular HTTPS requests to cdn-sync-update.net every ~60s, each ~2 KB, uniform timing (beaconing pattern).", v: "malicious", p: "p1" },
+  { id: "A-1044", time: "09:03", src: "Email gateway", ev: "Phishing email with an .html credential-harvesting attachment — QUARANTINED, never delivered to the recipient.", v: "benign", p: "p4" },
+  { id: "A-1047", time: "09:10", src: "DLP", ev: "WS-FINANCE-12: 218 MB uploaded over HTTPS to cdn-sync-update.net in a single session.", v: "malicious", p: "p1" },
+  { id: "A-1049", time: "09:14", src: "Cloud/IdP", ev: "'Impossible travel': user 'j.diaz' signed in from two regions 11 minutes apart (one matches a known corporate VPN egress).", v: "suspicious", p: "p2" }
+];
+/* the real intrusion = the three malicious alerts on WS-FINANCE-12 */
+const MALICIOUS = ["A-1032", "A-1041", "A-1047"];
+
+const VERDICTS = [ ["", "— verdict —"], ["fp", "False positive"], ["benign", "Benign"], ["suspicious", "Suspicious"], ["malicious", "Malicious"] ];
+const PRIOS = [ ["", "— priority —"], ["p1", "P1 Critical"], ["p2", "P2 High"], ["p3", "P3 Medium"], ["p4", "P4 Low"] ];
+const VLABEL = Object.fromEntries(VERDICTS), PLABEL = Object.fromEntries(PRIOS);
+
+const FACTS = {
+  q_host:    { hash: "a34fb6d92483ff60db9b5f13ff6ba2909132b4d4f2559e0fec23a7b8302f562e",
+               label: "Which host is compromised?", sub: "The hostname shared by all three malicious alerts.", ph: "hostname",
+               tip: "Look at the three alerts you marked Malicious — they all name the same workstation." },
+  q_c2:      { hash: "c826760611ab445fa98599909841640e6d0b097c50851f45385f2c44aa50bb1f",
+               label: "What is the command-and-control domain?", sub: "The external domain the host is beaconing to and exfiltrating data to.", ph: "domain",
+               tip: "Two of the malicious alerts (the beacon and the upload) name the same external domain." },
+  q_first:   { hash: "5445227906ff641991e56006e561426d139d2be16a01f50b9256e58040db027d",
+               label: "Which alert ID shows the initial code execution?", sub: "The earliest malicious alert — where the attacker first ran code on the host.", ph: "A-####",
+               tip: "Of the malicious alerts, the earliest by time is the macro spawning PowerShell." }
+};
+
+const DECISION = {
+  prompt: "WS-FINANCE-12 is confirmed compromised with live C2 and 218 MB already exfiltrated. It's 09:20. What's your move?",
+  options: [
+    { id: "a", best: true, fx: { s: 20, t: 8 },
+      text: "Isolate WS-FINANCE-12 via EDR, block cdn-sync-update.net at proxy/DNS, preserve the host, and escalate to IR as a P1.",
+      result: "This cuts the C2 and stops further exfiltration immediately while keeping the host intact for forensics, and it gets the incident into the right hands. Targeted, fast and reversible." },
+    { id: "b", fx: { s: 5, t: -10 },
+      text: "Reimage WS-FINANCE-12 straight away so it's clean for the user.",
+      result: "Reimaging destroys the memory and disk evidence you need to understand the intrusion and prove what was taken — and doesn't address the stolen data or confirm the attacker is fully out. Contain first, image, then rebuild." },
+    { id: "c", fx: { s: -10, t: -5 },
+      text: "Leave it running and keep monitoring for another hour to gather more detail.",
+      result: "There is already active data exfiltration. Watching longer lets more data leave. You have enough to act now." }
+  ]
+};
+/* ===================== END SCENARIO ===================== */
+
+
+const STEP_LABELS = ["Triage the queue", "Trace the intrusion", "Escalate"];
+const KEY = "triagelab-triage01-v1";
+const $ = (s) => document.querySelector(s);
+const el = (t, c, h) => { const n = document.createElement(t); if (c) n.className = c; if (h != null) n.innerHTML = h; return n; };
+const esc = (s) => String(s).replace(/[&<>]/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;" }[c]));
+
+let state = loadState();
+function fresh() { return { started: false, idx: 0, triage: {}, triageSubmitted: false, answers: {}, decision: null, meters: { s: 30, t: 60 } }; }
+function loadState() { try { const r = localStorage.getItem(KEY); if (r) { const s = JSON.parse(r); if (s && typeof s.idx === "number") return s; } } catch (e) {} return fresh(); }
+function save() { try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) {} }
+async function sha256(s) { const b = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s)); return [...new Uint8Array(b)].map(x => x.toString(16).padStart(2,"0")).join(""); }
+const norm = (v) => String(v).trim().toLowerCase().replace(/\s+/g, "");
+
+function renderBar() {
+  const se = $("#steps"); se.innerHTML = "";
+  STEP_LABELS.forEach((l, i) => se.appendChild(el("li", i < state.idx ? "done" : i === state.idx ? "now" : "", l)));
+  $("#progress").innerHTML = `Step <b>${Math.min(state.idx + 1, STEP_LABELS.length)}</b> / ${STEP_LABELS.length}`;
+}
+
+function render() {
+  renderBar();
+  if (state.idx >= STEP_LABELS.length) return renderReport();
+  const w = $("#stageWrap"); w.hidden = false; w.innerHTML = "";
+  if (state.idx === 0) renderTriage(w);
+  else if (state.idx === 1) renderInvestigate(w);
+  else renderDecision(w);
+  w.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+/* ---- step 0: triage ---- */
+function renderTriage(w) {
+  const intro = el("section", "panel intro");
+  intro.innerHTML = `<div class="msg"><div class="avatar">SR</div><div><div class="who"><b>Sam Reyes</b> · SOC lead</div><p>Morning. Twelve alerts came in overnight. Work the whole queue — verdict and priority on each — then we'll deal with whatever's real. Don't get baited by the scary-looking ones that were already blocked.</p></div></div>
+    <h2>Overnight alert queue</h2>
+    <p class="lede">Classify all 12. A real attack that was <b>blocked</b> is Benign/low priority; an <b>active</b> compromise is Malicious/P1.</p>`;
+  w.appendChild(intro);
+
+  const queue = el("section", "panel", null); queue.style.padding = "18px 20px";
+  const stage = el("div", "stage");
+  const tb = el("div", "toolbar");
+  tb.innerHTML = `<span class="count" id="tcount"></span>`;
+  const sub = el("button", "btn", "Submit triage");
+  sub.id = "submitTriage";
+  tb.appendChild(sub);
+  stage.appendChild(tb);
+
+  const q = el("div", "queue");
+  ALERTS.forEach(a => {
+    const cur = state.triage[a.id] || {};
+    const card = el("div", "alert" + (cur.v && cur.p ? " set" : ""));
+    card.id = "card-" + a.id;
+    const top = el("div", "alert-top");
+    top.innerHTML = `<span class="alert-id">${a.id}</span><span class="alert-src">${esc(a.src)}</span><span class="alert-time">${a.time}</span>`;
+    card.appendChild(top);
+    card.appendChild(el("div", "alert-ev", esc(a.ev)));
+    const ctl = el("div", "controls");
+    ctl.appendChild(makeSelect(a.id, "v", VERDICTS, cur.v));
+    ctl.appendChild(makeSelect(a.id, "p", PRIOS, cur.p));
+    card.appendChild(ctl);
+    q.appendChild(card);
+  });
+  stage.appendChild(q);
+  const note = el("p", "note", ""); note.id = "triageNote";
+  stage.appendChild(note);
+  queue.appendChild(stage);
+  w.appendChild(queue);
+
+  updateTriageCount();
+  sub.addEventListener("click", submitTriage);
+}
+function makeSelect(id, kind, opts, val) {
+  const wrap = el("div", "control");
+  wrap.appendChild(el("label", null, kind === "v" ? "Verdict" : "Priority"));
+  const sel = document.createElement("select");
+  opts.forEach(([v, lab]) => { const o = document.createElement("option"); o.value = v; o.textContent = lab; if (v === val) o.selected = true; sel.appendChild(o); });
+  if (val) sel.classList.add("done");
+  sel.addEventListener("change", () => {
+    state.triage[id] = state.triage[id] || {};
+    state.triage[id][kind] = sel.value;
+    sel.classList.toggle("done", !!sel.value);
+    const c = state.triage[id];
+    $("#card-" + id).classList.toggle("set", !!(c.v && c.p));
+    save(); updateTriageCount();
+  });
+  wrap.appendChild(sel);
+  return wrap;
+}
+function updateTriageCount() {
+  const done = ALERTS.filter(a => state.triage[a.id] && state.triage[a.id].v && state.triage[a.id].p).length;
+  const c = $("#tcount"); if (c) c.innerHTML = `<b>${done}</b> / ${ALERTS.length} alerts triaged`;
+  const b = $("#submitTriage"); if (b) b.disabled = done < ALERTS.length;
+}
+function submitTriage() {
+  const missedMal = MALICIOUS.filter(id => (state.triage[id] || {}).v !== "malicious");
+  const note = $("#triageNote");
+  if (missedMal.length) {
+    note.className = "note bad";
+    note.textContent = `Not yet. ${missedMal.length} of the alerts that make up the real intrusion ${missedMal.length === 1 ? "is" : "are"} still not marked Malicious. They share a host and an external domain — find the chain of execution, beaconing and data upload, and re-check your verdicts.`;
+    return;
+  }
+  state.triageSubmitted = true;
+  state.idx = 1; save(); render();
+}
+
+/* ---- step 1: investigate ---- */
+function renderInvestigate(w) {
+  const sec = el("section", "panel task");
+  sec.innerHTML = `<h2>Trace the intrusion</h2>
+    <div class="msg"><div class="avatar">SR</div><div><div class="who"><b>Sam Reyes</b> · SOC lead</div><p>Good — you caught all three. Now pull the key facts out of those alerts so I can open the incident record.</p></div></div>
+    <div class="steer"><p>Everything you need is in the three alerts you marked <b>Malicious</b>. Scroll up is disabled now — work from what they said: a host running an encoded PowerShell, a 60-second beacon, and a 218 MB upload.</p></div>`;
+  const form = el("form", "stage");
+  const solved = Object.keys(FACTS).every(k => state.answers[k]);
+  Object.entries(FACTS).forEach(([k, f]) => {
+    const prev = state.answers[k];
+    const fld = el("div", "field");
+    fld.appendChild(el("label", null, esc(f.label)));
+    if (f.sub) fld.appendChild(el("p", "sub", esc(f.sub)));
+    const row = el("div", "answer-row");
+    const input = document.createElement("input"); input.type = "text"; input.placeholder = f.ph; input.spellcheck = false; input.autocomplete = "off";
+    if (prev) { input.value = prev; input.disabled = true; }
+    const st = el("span", "status" + (prev ? " ok" : ""), prev ? "✓" : "");
+    row.appendChild(input); row.appendChild(st); fld.appendChild(row);
+    if (f.tip) { const d = el("details", "tip"); d.innerHTML = `<summary>Stuck? Show a nudge</summary><p>${esc(f.tip)}</p>`; fld.appendChild(d); }
+    f._i = input; f._s = st;
+    form.appendChild(fld);
+  });
+  if (!solved) { const row = el("div", "actions"); const b = el("button", "btn", "Check answers"); b.type = "submit"; row.appendChild(b); form.appendChild(row); }
+  form.addEventListener("submit", (e) => { e.preventDefault(); checkFacts(); });
+  sec.appendChild(form);
+  if (solved) { const row = el("div", "actions"); const b = el("button", "btn", "Next step →"); b.addEventListener("click", () => { state.idx = 2; save(); render(); }); sec.appendChild(row); row.appendChild(b); }
+  w.appendChild(sec);
+
+  // re-show the three malicious alerts for reference
+  const ref = el("section", "panel intro");
+  ref.innerHTML = `<h2>The three malicious alerts</h2>`;
+  const q = el("div", "queue");
+  ALERTS.filter(a => MALICIOUS.includes(a.id)).forEach(a => {
+    const card = el("div", "alert set");
+    card.innerHTML = `<div class="alert-top"><span class="alert-id">${a.id}</span><span class="alert-src">${esc(a.src)}</span><span class="alert-time">${a.time}</span></div><div class="alert-ev">${esc(a.ev)}</div>`;
+    q.appendChild(card);
+  });
+  ref.appendChild(q);
+  w.appendChild(ref);
+}
+async function checkFacts() {
+  for (const [k, f] of Object.entries(FACTS)) {
+    if (state.answers[k]) continue;
+    const v = norm(f._i.value); if (!v) { f._s.textContent = "—"; f._s.className = "status"; continue; }
+    if (await sha256(v) === f.hash) { state.answers[k] = v; f._i.disabled = true; f._s.textContent = "✓ correct"; f._s.className = "status ok"; }
+    else { f._s.textContent = "✗ not it"; f._s.className = "status no"; }
+  }
+  save();
+  if (Object.keys(FACTS).every(k => state.answers[k])) render();
+}
+
+/* ---- step 2: decision ---- */
+function renderDecision(w) {
+  const sec = el("section", "panel task");
+  sec.innerHTML = `<h2>Escalate</h2>
+    <div class="msg"><div class="avatar">SR</div><div><div class="who"><b>Sam Reyes</b> · SOC lead</div><p>Incident's open. Your call on the immediate action.</p></div></div>
+    <p class="prompt">${esc(DECISION.prompt)}</p>`;
+  const opts = el("div", "options");
+  DECISION.options.forEach((o, i) => {
+    const b = el("button", "opt");
+    b.innerHTML = `<span class="key">${String.fromCharCode(65 + i)}</span><span>${esc(o.text)}</span>`;
+    if (state.decision) { b.disabled = true; b.classList.add(o.id === state.decision ? "chosen" : "faded"); }
+    else b.addEventListener("click", () => { Object.entries(o.fx).forEach(([k, v]) => state.meters[k] = Math.max(0, Math.min(100, state.meters[k] + v))); state.decision = o.id; save(); render(); });
+    opts.appendChild(b);
+  });
+  sec.appendChild(opts);
+  if (state.decision) {
+    const o = DECISION.options.find(x => x.id === state.decision);
+    const out = el("div", "outcome"); out.appendChild(el("p", null, esc(o.result))); sec.appendChild(out);
+    const row = el("div", "actions"); const b = el("button", "btn", "Close the queue →"); b.addEventListener("click", () => { state.idx = 3; save(); render(); }); row.appendChild(b); sec.appendChild(row);
+  }
+  w.appendChild(sec);
+}
+
+/* ---- report ---- */
+function renderReport() {
+  $("#stageWrap").hidden = true;
+  const r = $("#report"); r.hidden = false; r.innerHTML = "";
+  let correct = 0; ALERTS.forEach(a => { const t = state.triage[a.id] || {}; if (t.v === a.v) correct++; });
+  let prioOK = 0; ALERTS.forEach(a => { const t = state.triage[a.id] || {}; if (t.p === a.p) prioOK++; });
+  const chosen = DECISION.options.find(o => o.id === state.decision);
+  const vpct = Math.round(correct / ALERTS.length * 100);
+  let grade, verdict;
+  const bestDecision = chosen && chosen.best;
+  if (vpct >= 85 && bestDecision) { grade = "A"; verdict = "Sharp triage and the right escalation. You cut through the noise, caught the full intrusion chain, and contained it without destroying evidence."; }
+  else if (vpct >= 70 && bestDecision) { grade = "B"; verdict = "Solid shift. You found and handled the intrusion; a few verdicts on the noise were off — check the debrief."; }
+  else if (vpct >= 55) { grade = "C"; verdict = "You found the intrusion, but mis-triaged a fair amount of the queue or picked a costlier response."; }
+  else { grade = "D"; verdict = "The real incident was caught, but the triage and/or response would cause problems in a real SOC. Review the debrief."; }
+
+  const flag = (state.answers.q_host && state.answers.q_c2 && state.answers.q_first) ? `FLAG{${state.answers.q_host}_${state.answers.q_c2}_${state.answers.q_first}}` : null;
+
+  r.appendChild(el("div", "eyebrow", "Shift report · QUEUE-2026-1019"));
+  const vr = el("div", "verdict"); const gc = grade === "A" ? "var(--good)" : grade === "D" ? "var(--bad)" : "var(--accent)";
+  vr.innerHTML = `<div class="grade" style="color:${gc}">${grade}</div><div><h2>Queue cleared</h2><p>${verdict}</p></div>`;
+  r.appendChild(vr);
+
+  const facts = el("div", "facts");
+  facts.innerHTML = `<div><span class="eyebrow">Verdicts correct</span><b>${correct} / ${ALERTS.length}</b></div>`
+    + `<div><span class="eyebrow">Priorities correct</span><b>${prioOK} / ${ALERTS.length}</b></div>`
+    + `<div><span class="eyebrow">Intrusion</span><b>${esc(state.answers.q_host || "WS-FINANCE-12")}</b></div>`;
+  r.appendChild(facts);
+
+  if (flag) {
+    r.appendChild(el("h2", null, "Your flag"));
+    const fb = el("div", "flagbox"); fb.innerHTML = `<code id="flagText">${esc(flag)}</code>`;
+    const copy = el("button", "btn ghost", "Copy");
+    copy.addEventListener("click", async () => { try { await navigator.clipboard.writeText(flag); copy.textContent = "Copied"; setTimeout(() => copy.textContent = "Copy", 1500); } catch (e) { const rg = document.createRange(); rg.selectNode($("#flagText")); const sel = getSelection(); sel.removeAllRanges(); sel.addRange(rg); } });
+    fb.appendChild(copy); r.appendChild(fb);
+    r.appendChild(el("p", "note", "Built from the three facts you recovered. Submit it on your course platform. The grade reflects your triage accuracy and escalation call."));
+  }
+
+  r.appendChild(el("h2", null, "Triage debrief"));
+  const list = el("ol", "debrief");
+  ALERTS.forEach(a => {
+    const t = state.triage[a.id] || {};
+    const ok = t.v === a.v;
+    const li = el("li");
+    li.appendChild(el("span", "id", a.id));
+    const d = el("span", "d");
+    d.innerHTML = `<span class="you">you: ${VLABEL[t.v] || "—"} / ${PLABEL[t.p] || "—"}</span> · correct: ${VLABEL[a.v]} / ${PLABEL[a.p]}`;
+    li.appendChild(d);
+    li.appendChild(el("span", "mark " + (ok ? "ok" : "no"), ok ? "✓" : "✗"));
+    list.appendChild(li);
+  });
+  r.appendChild(list);
+
+  if (chosen) { r.appendChild(el("h2", null, "Escalation")); const p = el("p", "note" + (chosen.best ? " good" : " bad")); p.textContent = `You chose: ${chosen.text}`; r.appendChild(p); if (!chosen.best) { const b = DECISION.options.find(o => o.best); const pb = el("p", "note"); pb.innerHTML = `<b>Best:</b> ${esc(b.text)}`; r.appendChild(pb); } }
+
+  const row = el("div", "restart-row");
+  const again = el("button", "btn ghost", "Review this shift"); again.addEventListener("click", () => { state.idx = 0; save(); $("#report").hidden = true; render(); window.scrollTo({ top: 0, behavior: "smooth" }); });
+  const reset = el("button", "btn", "Start a fresh shift"); reset.addEventListener("click", resetAll);
+  row.appendChild(again); row.appendChild(reset); r.appendChild(row);
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+function resetAll() { state = fresh(); save(); $("#report").hidden = true; $("#stageWrap").hidden = true; $("#briefing").hidden = false; $("#resetBtn").hidden = true; $("#resumeHint").hidden = true; renderBar(); window.scrollTo({ top: 0, behavior: "smooth" }); }
+function begin() { state.started = true; save(); $("#briefing").hidden = true; $("#report").hidden = true; render(); }
+$("#startBtn").addEventListener("click", begin);
+$("#resetBtn").addEventListener("click", resetAll);
+
+renderBar();
+if (state.started) { $("#resumeHint").hidden = false; $("#resetBtn").hidden = false; $("#briefing").hidden = true; render(); }
+</script>
+</body>
+</html>
